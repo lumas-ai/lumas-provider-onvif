@@ -3,13 +3,16 @@ package main
 import (
   "fmt"
   "flag"
+  "errors"
   "log"
   "net"
   "context"
+  "crypto/md5"
+  "encoding/hex"
   "time"
   "google.golang.org/grpc"
 
-  . "github.com/3d0c/gmf"
+  . "github.com/lumas-ai/lumas-provider-onvif"
   api "github.com/lumas-ai/lumas-core/protos/golang/provider"
 )
 
@@ -23,120 +26,34 @@ var (
 
 type CameraServer struct { }
 
+var (
+  cameras map[string]*Camera
+)
+
+func generateCameraID(name string) (string, error) {
+  hasher := md5.New()
+  hasher.Write([]byte(name))
+  return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_StreamRTPServer) error {
-  var videoOutputSDP string
-  var audioOutputSDP string
-  var audioOutputCtx *FmtCtx
-  var videoOutputCtx *FmtCtx
-  var sentFrames int
-  var skippedFrames int
-
-  //Create the input context that will stream the RTSP feed from the camera
   rs := config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue()
-  inputCtx, err := NewInputCtx(rs)
-  if err != nil {
-    log.Println(err)
-    return err
+  cameraID, _ := generateCameraID(rs)
+  camera := &Camera{}
+  defer camera.Close()
+
+  if cameras == nil {
+    cameras = make(map[string]*Camera)
   }
-  defer inputCtx.Free()
-  inputCtx.Dump()
+  cameras[cameraID] = camera
 
-  //Set up video output context
-  vist, err := inputCtx.GetBestStream(AVMEDIA_TYPE_VIDEO)
-  if err != nil {
-    log.Println("The camera does not support video")
-  } else {
-    videoRTPString := fmt.Sprintf("rtp://%s:%d", config.RtpAddress, config.VideoRTPPort)
-    videoOutputCtx, err = NewOutputCtxWithFormatName(videoRTPString, "rtp")
-    if err != nil {
-      log.Println("Could not create output context: " + err.Error())
-      return err
-    }
-    defer videoOutputCtx.Free()
-    videoOutputCtx.SetStartTime(0)
-    if _, err = videoOutputCtx.AddStreamWithCodeCtx(vist.CodecCtx()); err != nil {
-      log.Println(err.Error())
-    }
-    videoOutputCtx.Dump()
-    videoOutputSDP = videoOutputCtx.GetSDPString()
-  }
+  asdp := make(chan string)
+  vsdp := make(chan string)
 
-  //Set up audio output context
-  aist, err := inputCtx.GetBestStream(AVMEDIA_TYPE_AUDIO)
-  if err != nil {
-    log.Println("The camera does not support audio")
-  } else {
-    audioRTPString := fmt.Sprintf("rtp://%s:%d", config.RtpAddress, config.AudioRTPPort)
-    audioOutputCtx, err = NewOutputCtxWithFormatName(audioRTPString, "rtp")
-    if err != nil {
-      log.Println("Could not create output context: " + err.Error())
-      return err
-    }
-    defer audioOutputCtx.Free()
-    audioOutputCtx.SetStartTime(0)
-    if _, err = audioOutputCtx.AddStreamWithCodeCtx(aist.CodecCtx()); err != nil {
-      log.Println(err.Error())
-    }
-    audioOutputCtx.Dump()
-    audioOutputSDP = audioOutputCtx.GetSDPString()
-  }
+  go camera.StartRTPStream(config, vsdp, asdp)
 
-  if err = videoOutputCtx.WriteHeader(); err != nil {
-    log.Fatal(err)
-  }
-
-  if err = audioOutputCtx.WriteHeader(); err != nil {
-    log.Fatal(err)
-  }
-
-  go func() {
-    for {
-      packet, err := inputCtx.GetNextPacket()
-      if err != nil {
-        packet.Free()
-        skippedFrames++
-        continue
-      }
-
-      if packet.StreamIndex() != vist.Index() {
-        //It's an audio packet
-
-        if aist == nil {
-          //This should never happen
-          log.Println("Could not read from audio input stream despite receiving an audio packet")
-          packet.Free()
-          continue
-        }
-
-        //The packet's stream index needs to match the stream index (0) of the RTP stream
-        packet.SetStreamIndex(0)
-
-        err = audioOutputCtx.WritePacket(packet)
-        if err != nil {
-          log.Println("Could not write audio packet" + err.Error())
-          packet.Free()
-          skippedFrames++
-          continue
-        } else {
-          sentFrames++
-        }
-      } else {
-        //The packet's stream index needs to match the stream index (0) of the RTP stream
-        packet.SetStreamIndex(0)
-        err = videoOutputCtx.WritePacket(packet)
-        if err != nil {
-          log.Println("Could not write video packet" + err.Error())
-          packet.Free()
-          skippedFrames++
-          continue
-        } else {
-          sentFrames++
-        }
-      }
-
-      packet.Free()
-    }
-  }()
+  videoOutputSDP := <-vsdp
+  audioOutputSDP := <-asdp
 
   //Send the first response with the SDP information
   sdp := api.SDP{
@@ -148,25 +65,61 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
   }
   stream.Send(&r)
 
-  //Send a status update every few seconds
+  //Send a status update every second
   for {
+    //the StopRTPStream call will remove the camera
+    //from the cameras map
+    if cameras[cameraID] == nil {
+      break
+    }
+
     r := api.StreamInfo{
-      SentFrames: int64(sentFrames),
-      DroppedFrames: int64(skippedFrames),
+      SentFrames: int64(camera.SentFrames),
+      DroppedFrames: int64(camera.DroppedFrames),
     }
     if err := stream.Send(&r); err != nil {
-      return err
+      break
     }
 
-    time.Sleep(1* time.Second)
+    time.Sleep(1 * time.Second)
   }
 
-  inputCtx.Free()
   return nil
 }
 
 func (s *CameraServer) Snapshot(ctx context.Context, config *api.CameraConfig) (*api.Image, error) {
   return new(api.Image), nil
+}
+
+func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPConfig) (*api.Result, error) {
+  rs := config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue()
+  cameraID, _ := generateCameraID(rs)
+  camera := cameras[cameraID]
+
+  if camera == nil {
+    r := api.Result{
+      Successful: false,
+      ErrorKind: "StreamNotFound",
+      Message: "Camera stream not found",
+    }
+    return &r, errors.New("Camera stream not found")
+  }
+
+  err := camera.Close()
+  if err != nil {
+     r := api.Result{
+      Successful: false,
+      ErrorKind: "CouldNotCloseStream",
+      Message: err.Error(),
+    }
+   return &r, err
+  }
+  delete(cameras, cameraID)
+
+  r := api.Result{
+    Successful: true,
+  }
+  return &r, nil
 }
 
 func main() {
