@@ -77,7 +77,6 @@ func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp 
     log.Fatal(err)
   }
 
-  fmt.Println(s.open)
   s.open = true
   defer s.Close()
   for {
@@ -89,7 +88,6 @@ func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp 
 
     packet, err := inputCtx.GetNextPacket()
     if err != nil {
-      fmt.Println(err.Error())
       packet.Free()
       s.DroppedFrames++
       continue
