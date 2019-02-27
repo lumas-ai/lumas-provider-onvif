@@ -132,6 +132,7 @@ func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp 
     packet.Free()
   }
 
+  log.Println("Closing RTP stream")
   return nil
 }
 
