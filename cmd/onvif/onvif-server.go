@@ -7,8 +7,6 @@ import (
   "log"
   "net"
   "context"
-  "crypto/md5"
-  "encoding/hex"
   "time"
   "google.golang.org/grpc"
 
@@ -30,17 +28,13 @@ var (
   cameras map[string]*Camera
 )
 
-func generateCameraID(name string) (string, error) {
-  hasher := md5.New()
-  hasher.Write([]byte(name))
-  return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
 func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_StreamRTPServer) error {
-  rs := config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue()
-  cameraID, _ := generateCameraID(rs)
-  camera := &Camera{}
+  camera := &Camera{Config: config}
+  cameraID, err := camera.GenerateCameraID()
   defer camera.Close()
+  if err != nil {
+    return err
+  }
 
   if cameras == nil {
     cameras = make(map[string]*Camera)
@@ -49,8 +43,14 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
 
   asdp := make(chan string)
   vsdp := make(chan string)
+  errors := make(chan error)
 
-  go camera.StartRTPStream(config, vsdp, asdp)
+  go func() {
+    err := camera.StartRTPStream(vsdp, asdp)
+    if err != nil {
+      errors <- err
+    }
+  }()
 
   videoOutputSDP := <-vsdp
   audioOutputSDP := <-asdp
@@ -67,8 +67,18 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
 
   //Send a status update every second
   for {
+    //Check for errors and continue if there
+    //are none
+    select {
+    case err := <-errors:
+      return err
+    default:
+      //continue on with loop
+    }
+
     //the StopRTPStream call will remove the camera
-    //from the cameras map
+    //from the cameras map, so we can check for its non-existence
+    //to know if we need to stop looping
     if cameras[cameraID] == nil {
       break
     }
@@ -92,8 +102,8 @@ func (s *CameraServer) Snapshot(ctx context.Context, config *api.CameraConfig) (
 }
 
 func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPConfig) (*api.Result, error) {
-  rs := config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue()
-  cameraID, _ := generateCameraID(rs)
+  cam := &Camera{Config: config}
+  cameraID, _ := cam.GenerateCameraID()
   camera := cameras[cameraID]
 
   if camera == nil {

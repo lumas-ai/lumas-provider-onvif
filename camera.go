@@ -3,24 +3,51 @@ package camera
 import (
   "fmt"
   "log"
+  "errors"
+  "crypto/md5"
+  "encoding/hex"
 
   . "github.com/3d0c/gmf"
   api "github.com/lumas-ai/lumas-core/protos/golang/provider"
 )
 
 type Camera struct {
+  Config *api.RTPConfig
   open bool
   inputCtx *FmtCtx
   SentFrames int
   DroppedFrames int
 }
 
-func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp chan<- string) error {
+func (s *Camera) getRTSPURL() (string, error) {
+  if len(s.Config.CameraConfig.Config.GetFields()) == 0 {
+    return "", errors.New("No configuration provided to ONVIF provider")
+  }
+
+  return s.Config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue(), nil
+}
+
+func (s *Camera) GenerateCameraID() (string, error) {
+  name, err := s.getRTSPURL()
+  if err != nil {
+    return "", err
+  }
+
+  hasher := md5.New()
+  hasher.Write([]byte(name))
+  return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
   var audioOutputCtx *FmtCtx
   var videoOutputCtx *FmtCtx
 
   //Create the input context that will stream the RTSP feed from the camera
-  rs := config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue()
+  rs, err := s.getRTSPURL()
+  if err != nil {
+    return err
+  }
+
   inputCtx, err := NewInputCtx(rs)
   if err != nil {
     log.Println(err)
@@ -34,7 +61,7 @@ func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp 
   if err != nil {
     log.Println("The camera does not support video")
   } else {
-    videoRTPString := fmt.Sprintf("rtp://%s:%d", config.RtpAddress, config.VideoRTPPort)
+    videoRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.VideoRTPPort)
     videoOutputCtx, err = NewOutputCtxWithFormatName(videoRTPString, "rtp")
     if err != nil {
       log.Println("Could not create output context: " + err.Error())
@@ -54,7 +81,7 @@ func (s *Camera) StartRTPStream(config *api.RTPConfig, vsdp chan<- string, asdp 
   if err != nil {
     log.Println("The camera does not support audio")
   } else {
-    audioRTPString := fmt.Sprintf("rtp://%s:%d", config.RtpAddress, config.AudioRTPPort)
+    audioRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.AudioRTPPort)
     audioOutputCtx, err = NewOutputCtxWithFormatName(audioRTPString, "rtp")
     if err != nil {
       log.Println("Could not create output context: " + err.Error())
