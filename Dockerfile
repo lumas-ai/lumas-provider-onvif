@@ -1,4 +1,4 @@
-FROM golang:alpine as ffmpeg-build
+FROM golang:alpine as build
 
 ENV FFMPEG_VERSION=4.1 BUILD_PREFIX=/opt/ffmpeg
 
@@ -21,18 +21,27 @@ RUN apk add --update build-base curl nasm tar bzip2 \
 ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib
 ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
-#FROM golang:alpine
-#
-#COPY --from=opencv-build /usr/local/lib64 /usr/local/lib64
-#COPY --from=opencv-build /usr/local/lib64/pkgconfig/opencv4.pc /usr/local/lib64/pkgconfig/opencv4.pc
-#COPY --from=opencv-build /usr/local/include/opencv4/opencv2 /usr/local/include/opencv4/opencv2
-#COPY --from=ffmpeg-build /opt/ffmpeg /opt/ffmpeg
-
-
 RUN apk add --update git pkgconfig gcc libc-dev \
     openssl lame libogg libvpx libvorbis libass \
     freetype libtheora opus libwebp x264 x264-libs x265 && \
-    go get github.com/3d0c/gmf && \
-    go get github.com/golang/protobuf/proto && \
-    go get github.com/golang/protobuf/ptypes/struct && \
-    go get google.golang.org/grpc
+    go get -u github.com/3d0c/gmf && \
+    go get -u github.com/golang/protobuf/proto && \
+    go get -u github.com/golang/protobuf/ptypes/struct && \
+    go get -u google.golang.org/grpc && \
+    go get -u github.com/lumas-ai/lumas-provider-onvif && \
+    cd / && go build /go/src/github.com/lumas-ai/lumas-provider-onvif/cmd/onvif/onvif-server.go
+
+
+
+FROM alpine:3.9
+
+ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
+
+COPY --from=build /opt/ffmpeg /opt/ffmpeg
+COPY --from=build /onvif-server /onvif-server
+
+RUN apk add --update openssl lame libogg libvpx libvorbis libass \
+    freetype libtheora opus libwebp x264 x264-libs x265
+
+ENTRYPOINT ["/onvif-server"]
