@@ -59,6 +59,7 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
   //Set up video output context
   vist, err := inputCtx.GetBestStream(AVMEDIA_TYPE_VIDEO)
   if err != nil {
+    vsdp <- "" //Push an empty string or the application hangs
     log.Println("The camera does not support video")
   } else {
     videoRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.VideoRTPPort)
@@ -74,11 +75,16 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     }
     videoOutputCtx.Dump()
     vsdp <- videoOutputCtx.GetSDPString()
+
+    if err = videoOutputCtx.WriteHeader(); err != nil {
+      log.Fatal(err)
+    }
   }
 
   //Set up audio output context
   aist, err := inputCtx.GetBestStream(AVMEDIA_TYPE_AUDIO)
   if err != nil {
+    asdp <- "" //Push an emptry string or the application hangs
     log.Println("The camera does not support audio")
   } else {
     audioRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.AudioRTPPort)
@@ -94,14 +100,10 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     }
     audioOutputCtx.Dump()
     asdp <- audioOutputCtx.GetSDPString()
-  }
 
-  if err = videoOutputCtx.WriteHeader(); err != nil {
-    log.Fatal(err)
-  }
-
-  if err = audioOutputCtx.WriteHeader(); err != nil {
-    log.Fatal(err)
+    if err = audioOutputCtx.WriteHeader(); err != nil {
+      log.Fatal(err)
+    }
   }
 
   s.open = true
@@ -115,44 +117,40 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
 
     packet, err := inputCtx.GetNextPacket()
     if err != nil {
+      fmt.Println(err.Error())
       packet.Free()
       s.DroppedFrames++
       continue
     }
 
-    if packet.StreamIndex() != vist.Index() {
-      //It's an audio packet
-
-      if aist == nil {
-        //This should never happen
-        log.Println("Could not read from audio input stream despite receiving an audio packet")
-        packet.Free()
-        continue
-      }
-
-      //The packet's stream index needs to match the stream index (0) of the RTP stream
-      packet.SetStreamIndex(0)
-
-      err = audioOutputCtx.WritePacket(packet)
-      if err != nil {
-        log.Println("Could not write audio packet" + err.Error())
-        packet.Free()
-        s.DroppedFrames++
-        continue
+    //Make sure the camera supports video before we start processing video frames
+    //It would very strange if this is nil
+    if vist != nil {
+      if packet.StreamIndex() == vist.Index() { //Is this a video packet
+        //The packet's stream index needs to match the stream index (0) of the RTP stream
+        packet.SetStreamIndex(0)
+        err = videoOutputCtx.WritePacket(packet)
+        if err != nil {
+          log.Println("Could not write video packet: " + err.Error())
+          packet.Free()
+          s.DroppedFrames++
+          continue
+        } else {
+          s.SentFrames++
+        }
       } else {
-        s.SentFrames++
+        //It must have been and audio packet
+        err := s.processAudioPacket(packet, audioOutputCtx, aist)
+        if err != nil {
+          packet.Free()
+          continue
+        }
       }
     } else {
-      //The packet's stream index needs to match the stream index (0) of the RTP stream
-      packet.SetStreamIndex(0)
-      err = videoOutputCtx.WritePacket(packet)
+      err := s.processAudioPacket(packet, audioOutputCtx, aist)
       if err != nil {
-        log.Println("Could not write video packet" + err.Error())
         packet.Free()
-        s.DroppedFrames++
         continue
-      } else {
-        s.SentFrames++
       }
     }
 
@@ -160,6 +158,30 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
   }
 
   log.Println("Closing RTP stream")
+  return nil
+}
+
+func (s *Camera) processAudioPacket(packet *Packet, octx *FmtCtx, aist *Stream) (error) {
+  if aist == nil {
+    //This should never happen
+    errString := "Could not read from audio input stream despite receiving an audio packet"
+    log.Println(errString)
+    return errors.New(errString)
+  }
+
+  //The packet's stream index needs to match the stream index (0) of the RTP stream
+  packet.SetStreamIndex(0)
+
+  err := octx.WritePacket(packet)
+  if err != nil {
+    errString := "Could not write audio packet: " + err.Error()
+    log.Println(errString)
+    s.DroppedFrames++
+    return errors.New(errString)
+  } else {
+    s.SentFrames++
+  }
+
   return nil
 }
 
