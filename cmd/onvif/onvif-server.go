@@ -22,32 +22,30 @@ var (
 	port       = flag.Int("port", 5390, "The server port")
 )
 
-type CameraServer struct { }
-
-var (
+type CameraServer struct {
   cameras map[string]*Camera
-)
+}
 
 func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_StreamRTPServer) error {
-  camera := &Camera{Config: config}
+  asdp      := make(chan string)
+  vsdp      := make(chan string)
+  errors    := make(chan error)
+  closeChan := make(chan bool)
+
+  camera := &Camera{Config: config, ServerCloseChan: closeChan}
   cameraID, err := camera.GenerateCameraID()
   defer camera.Close()
   if err != nil {
     return err
   }
 
-  if cameras == nil {
-    cameras = make(map[string]*Camera)
+  if s.cameras == nil {
+    s.cameras = make(map[string]*Camera)
   }
-  cameras[cameraID] = camera
-
-  asdp := make(chan string)
-  vsdp := make(chan string)
-  errors := make(chan error)
-  stream := make(chan bool)
+  s.cameras[cameraID] = camera
 
   go func() {
-    err := camera.StartRTPStream(vsdp, asdp, stream)
+    err := camera.StartRTPStream(vsdp, asdp)
     if err != nil {
       errors <- err
     }
@@ -67,7 +65,14 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
   stream.Send(&r)
 
   //Send a status update every second
+  statusLoop:
   for {
+    select {
+    case _ = <-camera.ServerCloseChan:
+      break statusLoop
+    default:
+    }
+
     //Check for errors and continue if there
     //are none
     select {
@@ -75,13 +80,6 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
       return err
     default:
       //continue on with loop
-    }
-
-    //the StopRTPStream call will remove the camera
-    //from the cameras map, so we can check for its non-existence
-    //to know if we need to stop looping
-    if cameras[cameraID] == nil {
-      break
     }
 
     r := api.StreamInfo{
@@ -95,6 +93,7 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
     time.Sleep(1 * time.Second)
   }
 
+  camera.ServerCloseChan <- true
   return nil
 }
 
@@ -105,7 +104,7 @@ func (s *CameraServer) Snapshot(ctx context.Context, config *api.CameraConfig) (
 func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPConfig) (*api.Result, error) {
   cam := &Camera{Config: config}
   cameraID, _ := cam.GenerateCameraID()
-  camera := cameras[cameraID]
+  camera := s.cameras[cameraID]
 
   if camera == nil {
     r := api.Result{
@@ -123,9 +122,9 @@ func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPCon
       ErrorKind: "CouldNotCloseStream",
       Message: err.Error(),
     }
-   return &r, err
+    return &r, err
   }
-  delete(cameras, cameraID)
+  delete(s.cameras, cameraID)
 
   r := api.Result{
     Successful: true,

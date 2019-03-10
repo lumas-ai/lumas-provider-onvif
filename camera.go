@@ -4,6 +4,7 @@ import (
   "fmt"
   "log"
   "errors"
+  "sync"
   "crypto/md5"
   "encoding/hex"
 
@@ -17,6 +18,7 @@ type Camera struct {
   SentFrames int
   DroppedFrames int
   closeChan chan bool
+  ServerCloseChan chan bool
 }
 
 func (s *Camera) getRTSPURL() (string, error) {
@@ -38,7 +40,7 @@ func (s *Camera) GenerateCameraID() (string, error) {
   return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string, stream chan bool) error {
+func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
   var audioOutputCtx *FmtCtx
   var videoOutputCtx *FmtCtx
 
@@ -163,9 +165,6 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string, stream c
     //stop processing packets
     select {
     case _ = <-s.closeChan:
-      //Close the stream channel so the server knows we're done
-      close(stream)
-
       //Let the close channel know that we're done
       s.closeChan <-true
 
@@ -201,7 +200,23 @@ func (s *Camera) processAudioPacket(packet *Packet, octx *FmtCtx, aist *Stream) 
 }
 
 func (s *Camera) Close() error {
-  s.closeChan <- true
-  _ = <-s.closeChan //Wait to recieve the all clear
+  var wg sync.WaitGroup
+  wg.Add(2)
+
+  go func() {
+    defer wg.Done()
+    if s.ServerCloseChan != nil {
+      s.ServerCloseChan <-true
+      _ = <-s.ServerCloseChan
+    }
+  }()
+
+  go func() {
+    defer wg.Done()
+    s.closeChan <- true
+    _ = <-s.closeChan //Wait to recieve the all clear
+  }()
+
+  wg.Wait()
   return nil
 }
