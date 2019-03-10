@@ -13,10 +13,10 @@ import (
 
 type Camera struct {
   Config *api.RTPConfig
-  open bool
   inputCtx *FmtCtx
   SentFrames int
   DroppedFrames int
+  closeChan chan bool
 }
 
 func (s *Camera) getRTSPURL() (string, error) {
@@ -38,7 +38,7 @@ func (s *Camera) GenerateCameraID() (string, error) {
   return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
+func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string, stream chan bool) error {
   var audioOutputCtx *FmtCtx
   var videoOutputCtx *FmtCtx
 
@@ -54,6 +54,7 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     return err
   }
   defer inputCtx.Free()
+  defer inputCtx.CloseInput()
   inputCtx.Dump()
 
   //Set up video output context
@@ -70,9 +71,13 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     }
     defer videoOutputCtx.Free()
     videoOutputCtx.SetStartTime(0)
+
     if _, err = videoOutputCtx.AddStreamWithCodeCtx(vist.CodecCtx()); err != nil {
       log.Println(err.Error())
     }
+
+    //Instantiate the the output context and push its SDP to the channel
+    //to send to the RTP client at the other end
     videoOutputCtx.Dump()
     vsdp <- videoOutputCtx.GetSDPString()
 
@@ -106,15 +111,13 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     }
   }
 
-  s.open = true
   defer s.Close()
-  for {
-    //If the camera has been closed
-    //stop processing packets
-    if !s.open {
-      break
-    }
+  //Make the channel that we'll use to monitor for when the stream should end
+  //The Camera.Close() method pushes close events to the channel
+  s.closeChan = make(chan bool)
 
+  //Get the packets and stream them to the RTP client
+  for {
     packet, err := inputCtx.GetNextPacket()
     if err != nil {
       fmt.Println(err.Error())
@@ -155,10 +158,22 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     }
 
     packet.Free()
-  }
 
-  log.Println("Closing RTP stream")
-  return nil
+    //If the camera has been closed
+    //stop processing packets
+    select {
+    case _ = <-s.closeChan:
+      //Close the stream channel so the server knows we're done
+      close(stream)
+
+      //Let the close channel know that we're done
+      s.closeChan <-true
+
+      inputCtx.CloseInput()
+      return nil
+    default:
+    }
+  }
 }
 
 func (s *Camera) processAudioPacket(packet *Packet, octx *FmtCtx, aist *Stream) (error) {
@@ -186,10 +201,7 @@ func (s *Camera) processAudioPacket(packet *Packet, octx *FmtCtx, aist *Stream) 
 }
 
 func (s *Camera) Close() error {
-  if s.open {
-    s.open = false
-    return nil
-  }
-
+  s.closeChan <- true
+  _ = <-s.closeChan //Wait to recieve the all clear
   return nil
 }

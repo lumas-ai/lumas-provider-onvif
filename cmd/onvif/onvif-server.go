@@ -44,9 +44,10 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
   asdp := make(chan string)
   vsdp := make(chan string)
   errors := make(chan error)
+  stream := make(chan bool)
 
   go func() {
-    err := camera.StartRTPStream(vsdp, asdp)
+    err := camera.StartRTPStream(vsdp, asdp, stream)
     if err != nil {
       errors <- err
     }
