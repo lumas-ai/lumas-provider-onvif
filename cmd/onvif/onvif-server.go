@@ -32,7 +32,8 @@ func (s *CameraServer) StreamRTP(config *api.RTPConfig, stream api.Camera_Stream
   errors    := make(chan error)
   closeChan := make(chan bool)
 
-  camera := &Camera{Config: config, ServerCloseChan: closeChan}
+  camera := &Camera{RTPConfig: config, ServerCloseChan: closeChan}
+  camera.CameraConfig = config.CameraConfig
   cameraID, err := camera.GenerateCameraID()
   defer camera.Close()
   if err != nil {
@@ -101,9 +102,9 @@ func (s *CameraServer) Snapshot(ctx context.Context, config *api.CameraConfig) (
   return new(api.Image), nil
 }
 
-func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPConfig) (*api.Result, error) {
-  cam := &Camera{Config: config}
-  cameraID, _ := cam.GenerateCameraID()
+func (s *CameraServer) StopRTPStream(context context.Context, config *api.Session) (*api.Result, error) {
+  //cam := &Camera{Config: config}
+  cameraID := "12345"
   camera := s.cameras[cameraID]
 
   if camera == nil {
@@ -130,6 +131,29 @@ func (s *CameraServer) StopRTPStream(context context.Context, config *api.RTPCon
     Successful: true,
   }
   return &r, nil
+}
+
+func (s *CameraServer) Describe(context context.Context, config *api.CameraConfig) (*api.CameraInfo, error) {
+  camera := &Camera{CameraConfig: config}
+
+  camera.GetInfo()
+
+  c := &api.CameraInfo{
+    VideoFormat: "h264",
+    AudioFormat: "aac",
+    PixFormat: "y263",
+    FrameRate: 20,
+    VideoSDP: "sdp stuffs",
+    AudioSDP: "sdp stuffs",
+    HasAudio: false,
+    HasVideo: true,
+    HasPan: false,
+    HasTilt: false,
+    HasZoom: false,
+    AcceptsAudio: false,
+  }
+
+  return c, nil
 }
 
 func main() {

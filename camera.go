@@ -12,21 +12,36 @@ import (
   api "github.com/lumas-ai/lumas-core/protos/golang/provider"
 )
 
+type CameraProperties struct {
+  VideoFormat string
+  AudioFormat string
+  PixFormat string
+  FrameRate int
+  HasAudio bool
+  HasVideo bool
+  HasPan bool
+  HasTilt bool
+  HasZoom bool
+  AcceptsAudio bool
+}
+
 type Camera struct {
-  Config *api.RTPConfig
+  RTPConfig *api.RTPConfig
+  CameraConfig *api.CameraConfig
   inputCtx *FmtCtx
   SentFrames int
   DroppedFrames int
   closeChan chan bool
   ServerCloseChan chan bool
+  Properties *CameraProperties
 }
 
 func (s *Camera) getRTSPURL() (string, error) {
-  if len(s.Config.CameraConfig.Config.GetFields()) == 0 {
+  if len(s.CameraConfig.Config.GetFields()) == 0 {
     return "", errors.New("No configuration provided to ONVIF provider")
   }
 
-  return s.Config.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue(), nil
+  return s.CameraConfig.Config.GetFields()["rtspStream"].GetStringValue(), nil
 }
 
 func (s *Camera) GenerateCameraID() (string, error) {
@@ -38,6 +53,46 @@ func (s *Camera) GenerateCameraID() (string, error) {
   hasher := md5.New()
   hasher.Write([]byte(name))
   return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func (s *Camera) GetInfo() error {
+  properties := &CameraProperties{}
+  defer func() {
+    s.Properties = properties
+  }()
+
+  //Create the input context that will stream the RTSP feed from the camera
+  rs, err := s.getRTSPURL()
+  if err != nil {
+    return err
+  }
+
+  inputCtx, err := NewInputCtx(rs)
+  if err != nil {
+    log.Println(err)
+    return err
+  }
+  defer inputCtx.Free()
+  defer inputCtx.CloseInput()
+  inputCtx.Dump()
+
+  _ , err = inputCtx.GetBestStream(AVMEDIA_TYPE_VIDEO)
+  if err != nil {
+    properties.HasVideo = false
+    log.Println("The camera does not support video")
+  } else {
+    properties.HasVideo = true
+  }
+
+  _ , err = inputCtx.GetBestStream(AVMEDIA_TYPE_AUDIO)
+  if err != nil {
+    properties.HasAudio = false
+    log.Println("The camera does not support video")
+  } else {
+    properties.HasAudio = true
+  }
+
+  return nil
 }
 
 func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
@@ -65,7 +120,7 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     vsdp <- "" //Push an empty string or the application hangs
     log.Println("The camera does not support video")
   } else {
-    videoRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.VideoRTPPort)
+    videoRTPString := fmt.Sprintf("rtp://%s:%d", s.RTPConfig.RtpAddress, s.RTPConfig.VideoRTPPort)
     videoOutputCtx, err = NewOutputCtxWithFormatName(videoRTPString, "rtp")
     if err != nil {
       log.Println("Could not create output context: " + err.Error())
@@ -94,7 +149,7 @@ func (s *Camera) StartRTPStream(vsdp chan<- string, asdp chan<- string) error {
     asdp <- "" //Push an emptry string or the application hangs
     log.Println("The camera does not support audio")
   } else {
-    audioRTPString := fmt.Sprintf("rtp://%s:%d", s.Config.RtpAddress, s.Config.AudioRTPPort)
+    audioRTPString := fmt.Sprintf("rtp://%s:%d", s.RTPConfig.RtpAddress, s.RTPConfig.AudioRTPPort)
     audioOutputCtx, err = NewOutputCtxWithFormatName(audioRTPString, "rtp")
     if err != nil {
       log.Println("Could not create output context: " + err.Error())
